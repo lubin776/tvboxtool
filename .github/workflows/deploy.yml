@@ -17,7 +17,7 @@ jobs:
       - name: 下载 ZIP 文件
         run: |
           curl -L -o package.zip \
-            "https://mpimg.cn/down.php/929fc5c30634181d49fc0bf3ac10fbf5.zip"
+            "https://mpimg.cn/down.php/f8a4c9a953f50ab56289fc270faf0ee3.zip"
 
       - name: 解压 ZIP 到仓库根目录
         run: |
