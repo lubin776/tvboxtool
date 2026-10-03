@@ -42,12 +42,23 @@ function isBrowserUA(ua) {
   return BROWSER_KEYWORDS.some(kw => ua.includes(kw));
 }
 
-/* ============ 单次抓取（含中文 URL 编码） ============ */
-async function tryFetchOnce(targetUrl, uaInfo) {
-  // ★ 中文 / 特殊字符 URL 编码
+/* ============ URL 规范化：中文域名 → Punycode，路径 → %XX ============ */
+function normalizeTargetUrl(rawUrl) {
   try {
-    targetUrl = encodeURI(targetUrl);
-  } catch {}
+    // new URL() 会自动：
+    //  - 中文域名 → Punycode (xn--...)
+    //  - 路径/查询 → percent-encode
+    return new URL(rawUrl).toString();
+  } catch {
+    // 退化：至少做路径编码
+    try { return encodeURI(rawUrl); } catch { return rawUrl; }
+  }
+}
+
+/* ============ 单次抓取 ============ */
+async function tryFetchOnce(targetUrl, uaInfo) {
+  // ★ 规范化 URL（中文域名 / 路径编码）
+  targetUrl = normalizeTargetUrl(targetUrl);
 
   const headers = {
     "User-Agent": uaInfo.ua,
