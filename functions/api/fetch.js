@@ -111,10 +111,19 @@ export async function onRequestPost(context) {
 
       try {
         const result = await tryFetchOnce(target, uaInfo);
-        // 解密处理
-        const processed = decryptAndProcess(result.data, target);
-        send({ type: "success", ua: uaInfo.ua, finalUrl: result.finalUrl, dataLength: processed.length });
+
+        // ===== 解密处理（await 已修复）=====
+        const processed = await decryptAndProcess(result.data, target);
+
+        send({
+          type: "success",
+          ua: uaInfo.ua,
+          finalUrl: result.finalUrl,
+          dataLength: processed.length,
+        });
         send({ type: "data", content: processed });
+        // ===========================
+
         break;
       } catch (err) {
         send({ type: "failed", ua: uaInfo.ua, error: err.message });
