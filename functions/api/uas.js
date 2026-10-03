@@ -15,7 +15,7 @@ const UA_LIBRARY = {
 
 const ALLOWED_ORIGINS = [
   "https://0.wudaozhe.net",
-  "https://jm.wudaozhe.net",         
+  "https://jm.wudaozhe.net",
   "http://localhost:3000",
   "http://localhost:5173",
   "http://localhost:8080",
