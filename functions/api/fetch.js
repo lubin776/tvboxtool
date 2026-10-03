@@ -1,10 +1,33 @@
 // ============================================================
 // CF Pages Function: /api/fetch
 // 模拟 TVBox 访问，逐个 UA 尝试，流式返回
+// 已加 CORS，支持前端部署在其他服务器
+// 不做 Content-Type 过滤，任何响应都读成文本交给 decode 层
 // ============================================================
 
 import { decryptAndProcess } from '../lib/decrypt.js';
 
+/* ============ CORS 白名单（改成你的域名） ============ */
+const ALLOWED_ORIGINS = [
+  "https://2.cdz.qzz.io",          // A 版（同源）
+  "https://你的前端域名.com",       // ← B 版，改成真的
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "http://localhost:8080",
+  "http://127.0.0.1:5500",
+];
+
+function corsHeaders(origin) {
+  const allow = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  return {
+    "Access-Control-Allow-Origin": allow,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "86400",
+  };
+}
+
+/* ============ UA 库 ============ */
 const UA_LIBRARY = {
   "okhttp315": { ua: "okhttp/3.15", xrw: "com.iptvbox" },
   "okhttp493": { ua: "okhttp/4.9.3", xrw: "com.iptvbox" },
@@ -25,7 +48,7 @@ function isBrowserUA(ua) {
 async function tryFetchOnce(targetUrl, uaInfo) {
   const headers = {
     "User-Agent": uaInfo.ua,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept": "*/*",
     "Connection": "keep-alive",
   };
   if (uaInfo.xrw) headers["X-Requested-With"] = uaInfo.xrw;
@@ -43,31 +66,43 @@ async function tryFetchOnce(targetUrl, uaInfo) {
 
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
+    // 不做任何 Content-Type 过滤，原样读成文本
     const text = await resp.text();
-    if (!text || text.length < 20) throw new Error("响应内容过短");
-    if (text.trim().startsWith("<!DOCTYPE html") || text.trim().startsWith("<html")) {
-      throw new Error("返回了 HTML 页面而非接口数据");
-    }
+    if (!text || text.length < 5) throw new Error("响应内容过短");
 
-    return { success: true, data: text, finalUrl: resp.url };
+    return {
+      success: true,
+      data: text,
+      finalUrl: resp.url,
+      contentType: resp.headers.get("content-type") || "",
+    };
   } catch (err) {
     clearTimeout(timer);
     throw new Error(err.name === "AbortError" ? "超时 (15s)" : err.message);
   }
 }
 
+/* ============ POST /api/fetch ============ */
 export async function onRequestPost(context) {
   const { request } = context;
+  const origin = request.headers.get("Origin") || "";
+
   let body;
   try {
     body = await request.json();
   } catch {
-    return new Response(JSON.stringify({ error: "无效的 JSON" }), { status: 400 });
+    return new Response(JSON.stringify({ error: "无效的 JSON" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+    });
   }
 
   const { target, uas: selectedUas } = body;
   if (!target) {
-    return new Response(JSON.stringify({ error: "缺少 target 参数" }), { status: 400 });
+    return new Response(JSON.stringify({ error: "缺少 target 参数" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+    });
   }
 
   // 构建 UA 队列
@@ -90,7 +125,10 @@ export async function onRequestPost(context) {
   queue = [...nonBrowserItems, ...browserItems];
 
   if (queue.length === 0) {
-    return new Response(JSON.stringify({ error: "UA 队列为空" }), { status: 400 });
+    return new Response(JSON.stringify({ error: "UA 队列为空" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+    });
   }
 
   // 流式响应
@@ -112,18 +150,23 @@ export async function onRequestPost(context) {
       try {
         const result = await tryFetchOnce(target, uaInfo);
 
-        // ===== 解密处理（await 已修复）=====
-        const processed = await decryptAndProcess(result.data, target);
+        // ===== 后置处理：删注释/删空白/多层解码 =====
+        const { data: processed, trace } = await decryptAndProcess(result.data, target);
 
         send({
           type: "success",
           ua: uaInfo.ua,
           finalUrl: result.finalUrl,
+          contentType: result.contentType,
+          rawLength: result.data.length,
           dataLength: processed.length,
         });
-        send({ type: "data", content: processed });
-        // ===========================
 
+        if (trace && trace.length) {
+          send({ type: "trace", steps: trace });
+        }
+
+        send({ type: "data", content: processed });
         break;
       } catch (err) {
         send({ type: "failed", ua: uaInfo.ua, error: err.message });
@@ -138,16 +181,18 @@ export async function onRequestPost(context) {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Transfer-Encoding": "chunked",
+      "X-Accel-Buffering": "no",
+      "Cache-Control": "no-cache",
+      ...corsHeaders(origin),
     },
   });
 }
 
-export async function onRequestOptions() {
+/* ============ OPTIONS 预检 ============ */
+export async function onRequestOptions(context) {
+  const origin = context.request.headers.get("Origin") || "";
   return new Response(null, {
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    },
+    status: 204,
+    headers: corsHeaders(origin),
   });
 }
