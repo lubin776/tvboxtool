@@ -1,9 +1,7 @@
 // ============================================================
-// TVBox 解密工具库 (JavaScript/WebCrypto 移植版)
-// - 多层循环解码：识别 → 解码 → 再识别 → 直到明文 JSON 或不再变化
-// - 字符串感知注释清理（不误伤 http://）
-// - 中文 Unicode 转义还原（多层）
-// - 标准 JSON 输出（中文不转义）
+// TVBox 解密工具库 (最终版)
+// 核心：每一轮 → 删注释 → 删所有空白 → 还原Unicode → 试解码
+//       直到拿到明文 JSON，或一轮无变化则停止
 // ============================================================
 
 /* ================= 基础工具 ================= */
@@ -48,64 +46,52 @@ async function aes128Decrypt(ciphertext, key, iv) {
   return new Uint8Array(decrypted);
 }
 
-/* ================= 判断"是否像 JSON" ================= */
+/* ================= 判断 ================= */
 
 function looksLikeJson(text) {
   const t = text.trim();
   if (!t) return false;
-  if (!(t.startsWith("{") || t.startsWith("["))) return false;
+  if (!(t.startsWith('{') || t.startsWith('['))) return false;
   try { JSON.parse(t); return true; } catch { return false; }
 }
 
-/* ================= 字符串感知的注释清理 ================= */
+/* ================= 第1步：删注释（字符串感知，不误伤 http://） ================= */
 
-function stripJsonComments(input) {
+function stripComments(input) {
   let out = "";
-  let inStr = false;
-  let quote = "";
-  let i = 0;
+  let inStr = false, quote = "", i = 0;
   while (i < input.length) {
-    const c = input[i];
-    const n = input[i + 1];
-
+    const c = input[i], n = input[i + 1];
     if (inStr) {
       out += c;
-      if (c === "\\") {
-        if (n !== undefined) { out += n; i += 2; continue; }
-      }
+      if (c === "\\") { if (n !== undefined) { out += n; i += 2; continue; } }
       if (c === quote) inStr = false;
       i++;
       continue;
     }
-
-    if (c === '"' || c === "'") {
-      inStr = true; quote = c; out += c; i++;
-      continue;
-    }
-
-    if (c === "/" && n === "/") {
-      while (i < input.length && input[i] !== "\n") i++;
-      continue;
-    }
+    if (c === '"' || c === "'") { inStr = true; quote = c; out += c; i++; continue; }
+    if (c === "/" && n === "/") { while (i < input.length && input[i] !== "\n") i++; continue; }
     if (c === "/" && n === "*") {
       i += 2;
       while (i < input.length && !(input[i] === "*" && input[i + 1] === "/")) i++;
-      i += 2;
-      continue;
+      i += 2; continue;
     }
-
-    out += c;
-    i++;
+    out += c; i++;
   }
   return out;
 }
 
-/* ================= 中文 Unicode 还原 ================= */
+/* ================= 第2步：删所有空白（换行/空格/tab） ================= */
+
+function stripAllWhitespace(input) {
+  return input.replace(/[\s\uFEFF\u200B]+/g, "");
+}
+
+/* ================= 第3步：还原 Unicode 转义 ================= */
 
 function restoreUnicodeEscape(str) {
   if (typeof str !== "string") return str;
-  let prev;
-  let cur = str;
+  let prev, cur = str;
   for (let k = 0; k < 5; k++) {
     prev = cur;
     cur = cur.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) =>
@@ -127,13 +113,18 @@ function deepRestoreUnicode(node) {
   return node;
 }
 
-/* ================= 单个解码器（返回 null 表示无效） ================= */
+/* ================= 剥离二进制噪声 ================= */
 
-// 1) 2423xxxx2324（hex + AES）
+function stripBinaryNoise(text) {
+  return text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
+}
+
+/* ================= 单个解码器 ================= */
+
 async function decode2423Hex(content) {
-  const match = content.match(/^2423([0-9a-fA-F]+)2324/);
-  if (!match) return null;
-  const hex = match[1];
+  const m = content.match(/^2423([0-9a-fA-F]+)2324/);
+  if (!m) return null;
+  const hex = m[1];
   if (hex.length < 32) return null;
   const bytes = hexToBytes(hex);
   const iv = bytes.slice(0, 16);
@@ -148,47 +139,37 @@ async function decode2423Hex(content) {
     try {
       const plain = await aes128Decrypt(cipher.buffer, key.slice(0, 16), iv);
       const text = new TextDecoder().decode(plain).trim();
-      if (text.startsWith("{") || text.startsWith("[")) return text;
+      if (text.startsWith('{') || text.startsWith('[')) return text;
     } catch {}
   }
   return null;
 }
 
-// 2) 2423xxxx2324（plain：base64 或 hex）
 async function decode2423Plain(content) {
-  const match = content.match(/^2423(.+)2324$/s);
-  if (!match) return null;
-  const inner = match[1];
-
-  // 尝试 base64
+  const m = content.match(/^2423(.+)2324$/s);
+  if (!m) return null;
+  const inner = m[1];
   try {
-    const decoded = atob(inner);
-    const t = decoded.trim();
-    if (t.startsWith("{") || t.startsWith("[")) return t;
+    const d = atob(inner); const t = d.trim();
+    if (t.startsWith('{') || t.startsWith('[')) return t;
   } catch {}
-
-  // 尝试 hex
   try {
     const bytes = hexToBytes(inner);
-    const text = new TextDecoder().decode(bytes);
-    const t = text.trim();
-    if (t.startsWith("{") || t.startsWith("[")) return t;
+    const t = new TextDecoder().decode(bytes).trim();
+    if (t.startsWith('{') || t.startsWith('[')) return t;
   } catch {}
-
   return null;
 }
 
-// 3) URL 解码（只在含 %XX 时才返回）
 function decodeUrl(content) {
   if (!/%[0-9A-Fa-f]{2}/.test(content)) return null;
   try {
-    const decoded = decodeURIComponent(content);
-    if (decoded !== content) return decoded;
+    const d = decodeURIComponent(content);
+    if (d !== content) return d;
   } catch {}
   return null;
 }
 
-// 4) AES + Base64
 async function decodeAesBase64(content) {
   try {
     const bytes = base64Decode(content);
@@ -204,40 +185,37 @@ async function decodeAesBase64(content) {
       try {
         const plain = await aes128Decrypt(cipher.buffer, key.slice(0, 16), iv);
         const text = new TextDecoder().decode(plain).trim();
-        if (text.startsWith("{") || text.startsWith("[")) return text;
+        if (text.startsWith('{') || text.startsWith('[')) return text;
       } catch {}
     }
   } catch {}
   return null;
 }
 
-// 5) Gzip + Base64
 async function decodeGzipBase64(content) {
   try {
     const bytes = base64Decode(content);
     const decompressed = await gzipDecompress(bytes);
     const text = new TextDecoder().decode(decompressed).trim();
-    if (text.startsWith("{") || text.startsWith("[")) return text;
+    if (text.startsWith('{') || text.startsWith('[')) return text;
   } catch {}
   return null;
 }
 
-// 6) 普通 Base64（放最后，避免误判）
 function decodeBase64(content) {
-  // 只处理"整体像 base64"的字符串
   const s = content.trim();
-  if (!/^[A-Za-z0-9+/=\s]+$/.test(s)) return null;
   if (s.length < 16) return null;
-  const compact = s.replace(/\s/g, "");
-  if (compact.length % 4 !== 0) return null;
+  if (!/^[A-Za-z0-9+/=]+$/.test(s)) return null;
+  if (s.length % 4 !== 0) return null;
   try {
-    const decoded = atob(compact.replace(/-/g, '+').replace(/_/g, '/'));
-    // 只接受可打印字符占比高、且看起来像结构或 JSON 的
+    const decoded = atob(s);
     const t = decoded.trim();
     if (!t) return null;
-    // 至少含 { 或 [ 或 < 或 常见字符
-    if (t.startsWith("{") || t.startsWith("[") ||
-        t.includes("{") || t.includes("[")) {
+    if (t.startsWith('{') || t.startsWith('[') ||
+        t.startsWith('http') ||
+        /^[A-Za-z0-9+/=]+$/.test(t) ||
+        /%[0-9A-Fa-f]{2}/.test(t) ||
+        t.includes('"') || t.includes("'")) {
       return t;
     }
   } catch {}
@@ -247,66 +225,62 @@ function decodeBase64(content) {
 /* ================= 提取 JSON 片段 ================= */
 
 function extractJsonFragment(text) {
-  const trimmed = text.trim();
-  if (!trimmed) return text;
-
-  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
-      (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
-    return trimmed;
-  }
-
-  const patterns = [/\{[\s\S]*\}/, /\[[\s\S]*\]/];
-  for (const pat of patterns) {
+  const t = text.trim();
+  if (!t) return text;
+  if ((t.startsWith('{') && t.endsWith('}')) ||
+      (t.startsWith('[') && t.endsWith(']'))) return t;
+  const pats = [/\{[\s\S]*\}/, /\[[\s\S]*\]/];
+  for (const pat of pats) {
     const m = text.match(pat);
-    if (m) {
-      try { JSON.parse(m[0]); return m[0]; } catch {}
-    }
+    if (m) { try { JSON.parse(m[0]); return m[0]; } catch {} }
   }
   return text;
 }
 
-/* ================= 核心：多层循环解码 ================= */
+/* ============================================================
+   核心：多层循环解码
+   ============================================================ */
 
-const MAX_ROUNDS = 8;      // 最多 8 层嵌套，防死循环
-const MIN_TEXT_LEN = 6;    // 太短直接放弃
+const MAX_ROUNDS = 10;
+const MIN_TEXT_LEN = 6;
 
 async function decodeLoop(rawText, trace) {
-  let current = (typeof rawText === "string" ? rawText : new TextDecoder().decode(rawText)).trim();
+  let current = (typeof rawText === "string" ? rawText : new TextDecoder().decode(rawText));
+
+  current = stripBinaryNoise(current);
 
   for (let round = 1; round <= MAX_ROUNDS; round++) {
-    // 每轮开始：先做"无损"清洗
     const before = current;
 
-    // 注释清理
-    let cleaned = stripJsonComments(current);
-    if (cleaned !== current) {
-      trace.push(`R${round}: stripComments`);
-      current = cleaned;
-    }
+    // 1) 删注释
+    let step = stripComments(current);
+    if (step !== current) trace.push(`R${round}: 删注释`);
+    current = step;
 
-    // Unicode 还原
-    cleaned = restoreUnicodeEscape(current);
-    if (cleaned !== current) {
-      trace.push(`R${round}: restoreUnicode`);
-      current = cleaned;
-    }
+    // 2) 删所有空白（换行/空格/tab）
+    step = stripAllWhitespace(current);
+    if (step !== current) trace.push(`R${round}: 删空白 (${current.length}→${step.length})`);
+    current = step;
 
-    current = current.trim();
+    // 3) 还原 Unicode
+    step = restoreUnicodeEscape(current);
+    if (step !== current) trace.push(`R${round}: 还原Unicode`);
+    current = step;
 
-    // 如果已经是 JSON，直接返回
+    // 4) 是 JSON？
     if (looksLikeJson(current)) {
       trace.push(`R${round}: 命中 JSON`);
       return current;
     }
 
-    // 依次尝试所有解码器（顺序：越具体的越靠前）
+    // 5) 依次尝试所有解码器
     const decoders = [
       { name: "2423hex",    fn: decode2423Hex },
       { name: "2423plain",  fn: decode2423Plain },
       { name: "AesBase64",  fn: decodeAesBase64 },
       { name: "GzipBase64", fn: decodeGzipBase64 },
-      { name: "UrlDecode",  fn: async (s) => decodeUrl(s) },
-      { name: "Base64",     fn: async (s) => decodeBase64(s) },
+      { name: "UrlDecode",  fn: async s => decodeUrl(s) },
+      { name: "Base64",     fn: async s => decodeBase64(s) },
     ];
 
     let advanced = false;
@@ -315,25 +289,14 @@ async function decodeLoop(rawText, trace) {
         const out = await d.fn(current);
         if (out && out !== current && out.length >= MIN_TEXT_LEN) {
           trace.push(`R${round}: ${d.name} (${current.length}→${out.length})`);
-          current = out.trim();
+          current = out;
           advanced = true;
-          break; // 本轮有进展 → 进入下一轮重新判断
+          break;
         }
       } catch {}
     }
 
-    // 尝试 ** 分隔（作为兜底）
-    if (!advanced && current.includes("**")) {
-      for (const part of current.split("**")) {
-        const t = part.trim();
-        if (t.length > 10 && looksLikeJson(t)) {
-          trace.push(`R${round}: ** 拆分命中`);
-          return t;
-        }
-      }
-    }
-
-    // 本轮无任何进展 → 跳出循环
+    // 6) 本轮无任何变化 → 停止
     if (!advanced && current === before) {
       trace.push(`R${round}: 无进展，停止`);
       break;
@@ -351,11 +314,9 @@ function absolutize(node, base) {
     const out = {};
     for (const [k, v] of Object.entries(node)) {
       if (typeof v === "string" && /^(url|link|src|pic|img)$/i.test(k)) {
-        try { out[k] = new URL(v, base).toString(); }
-        catch { out[k] = v; }
+        try { out[k] = new URL(v, base).toString(); } catch { out[k] = v; }
       } else if (typeof v === "string" && /(Url|Link|URL|href)$/.test(k)) {
-        try { out[k] = new URL(v, base).toString(); }
-        catch { out[k] = v; }
+        try { out[k] = new URL(v, base).toString(); } catch { out[k] = v; }
       } else {
         out[k] = absolutize(v, base);
       }
@@ -371,15 +332,13 @@ export async function decryptAndProcess(rawText, sourceUrl) {
   const trace = [];
   const decoded = await decodeLoop(rawText, trace);
 
-  // 如果是合法 JSON，美化 + 中文还原 + 路径补全
   const fragment = extractJsonFragment(decoded);
   try {
     let obj = JSON.parse(fragment);
     obj = deepRestoreUnicode(obj);
     obj = absolutize(obj, sourceUrl);
-    return JSON.stringify(obj, null, 2);
+    return { data: JSON.stringify(obj, null, 2), trace };
   } catch {
-    // 不是合法 JSON：至少把中文还原出来
-    return restoreUnicodeEscape(fragment);
+    return { data: restoreUnicodeEscape(fragment), trace };
   }
 }
