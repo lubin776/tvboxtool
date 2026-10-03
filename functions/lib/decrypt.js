@@ -1,12 +1,12 @@
 // ============================================================
-// TVBox 解密库 v3 - 严格流程：清理 → 判断 → 解密 → 循环
+// decrypt.js - 严格循环：清理 → 解密 → 判断 → 循环
 // ============================================================
 
 /**
- * 第一步：清理文本（删注释、换行、回车、制表、压缩空格）
- * 任何拿到手的文本都先过这个函数
+ * 清理函数：任何一次拿到文本，第一步就执行
+ * 删注释、删换行回车制表、压缩空格
  */
-function cleanText(text) {
+function clean(text) {
   if (typeof text !== 'string') {
     try { text = new TextDecoder('utf-8').decode(text); } catch { text = String(text); }
   }
@@ -16,40 +16,37 @@ function cleanText(text) {
   text = text.replace(/\/\*[\s\S]*?\*\//g, '');
   // 删换行、回车、制表
   text = text.replace(/[\n\r\t]/g, '');
-  // 压缩连续空格为单个空格
+  // 压缩连续空格
   text = text.replace(/ {2,}/g, ' ');
   return text.trim();
 }
 
 /**
- * 判断是否是 JSON 明文（对象或数组）
+ * 判断是否是 JSON 明文
  */
-function isPlainJson(text) {
+function isJson(text) {
   try {
     const obj = JSON.parse(text);
-    if (obj && (typeof obj === 'object')) return true;
-  } catch {}
-  return false;
-}
-
-/**
- * Base64 解码（支持 URL-safe）
- */
-function base64Decode(str) {
-  let s = str.replace(/-/g, '+').replace(/_/g, '/').trim();
-  while (s.length % 4) s += '=';
-  try {
-    const binary = atob(s);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes;
+    return obj && typeof obj === 'object';
   } catch {
-    throw new Error('Base64 解码失败');
+    return false;
   }
 }
 
 /**
- * 十六进制转 bytes
+ * Base64 解码
+ */
+function b64Decode(str) {
+  let s = str.replace(/-/g, '+').replace(/_/g, '/').trim();
+  while (s.length % 4) s += '=';
+  const binary = atob(s);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/**
+ * hex 转 bytes
  */
 function hexToBytes(hex) {
   const bytes = new Uint8Array(hex.length / 2);
@@ -62,69 +59,50 @@ function hexToBytes(hex) {
 /**
  * AES-128-CBC 解密
  */
-async function aes128Decrypt(ciphertext, key, iv) {
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw', key, { name: 'AES-CBC' }, false, ['decrypt']
-  );
-  const decrypted = await crypto.subtle.decrypt(
-    { name: 'AES-CBC', iv }, cryptoKey, ciphertext
-  );
-  return new Uint8Array(decrypted);
+async function aesDecrypt(ciphertext, key, iv) {
+  const cryptoKey = await crypto.subtle.importKey('raw', key, { name: 'AES-CBC' }, false, ['decrypt']);
+  const decrypted = await crypto.subtle.decrypt({ name: 'AES-CBC', iv }, cryptoKey, ciphertext);
+  return new TextDecoder('utf-8').decode(new Uint8Array(decrypted)).trim();
 }
 
 /**
  * 尝试 2423 系列解密
  */
-async function tryDecrypt2423(content) {
-  // hex 形态: 2423<hex>2324
-  let match = content.match(/^2423([0-9a-fA-F]+)2324$/);
-  if (match) {
-    const hex = match[1];
-    if (hex.length >= 32) {
-      try {
-        const bytes = hexToBytes(hex);
-        const iv = bytes.slice(0, 16);
-        const cipher = bytes.slice(16);
-        const keys = [
-          new TextEncoder().encode("1234567890123456"),
-          new TextEncoder().encode("tvbox1234567890"),
-          new TextEncoder().encode("iptvbox12345678"),
-          iv,
-        ];
-        for (const key of keys) {
-          try {
-            const plain = await aes128Decrypt(cipher.buffer, key.slice(0, 16), iv);
-            const text = new TextDecoder('utf-8').decode(plain).trim();
-            if (text.length > 5) return text;
-          } catch {}
-        }
-      } catch {}
+async function try2423(content) {
+  // hex: 2423<hex>2324
+  let m = content.match(/^2423([0-9a-fA-F]+)2324$/);
+  if (m) {
+    const bytes = hexToBytes(m[1]);
+    if (bytes.length >= 32) {
+      const iv = bytes.slice(0, 16);
+      const cipher = bytes.slice(16);
+      const keys = [
+        new TextEncoder().encode("1234567890123456"),
+        new TextEncoder().encode("tvbox1234567890"),
+        new TextEncoder().encode("iptvbox12345678"),
+        iv,
+      ];
+      for (const k of keys) {
+        try { return await aesDecrypt(cipher.buffer, k.slice(0, 16), iv); } catch {}
+      }
     }
   }
-
-  // plain 形态: 2423<base64_or_text>2324
-  match = content.match(/^2423(.+?)2324$/s);
-  if (match) {
-    const inner = match[1].trim();
-    // 尝试 inner 是 Base64
-    try {
-      const bytes = base64Decode(inner);
-      const text = new TextDecoder('utf-8').decode(bytes).trim();
-      if (text.length > 5) return text;
-    } catch {}
-    // 直接返回
+  // plain: 2423<inner>2324
+  m = content.match(/^2423(.+?)2324$/s);
+  if (m) {
+    const inner = m[1].trim();
+    try { return new TextDecoder('utf-8').decode(b64Decode(inner)); } catch {}
     if (inner.length > 5) return inner;
   }
-
   return null;
 }
 
 /**
- * 尝试 AES + Base64（非 2423 包装）
+ * 尝试 AES+Base64（非2423包装）
  */
-async function tryAesBase64(content) {
+async function tryAesB64(content) {
   try {
-    const bytes = base64Decode(content);
+    const bytes = b64Decode(content);
     if (bytes.length < 32) return null;
     const iv = bytes.slice(0, 16);
     const cipher = bytes.slice(16);
@@ -134,133 +112,114 @@ async function tryAesBase64(content) {
       new TextEncoder().encode("iptvbox12345678"),
       iv,
     ];
-    for (const key of keys) {
-      try {
-        const plain = await aes128Decrypt(cipher.buffer, key.slice(0, 16), iv);
-        const text = new TextDecoder('utf-8').decode(plain).trim();
-        if (text.length > 5) return text;
-      } catch {}
+    for (const k of keys) {
+      try { return await aesDecrypt(cipher.buffer, k.slice(0, 16), iv); } catch {}
     }
   } catch {}
   return null;
 }
 
 /**
- * 尝试 Gzip + Base64
+ * 尝试 Gzip+Base64
  */
-async function tryGzipBase64(content) {
+async function tryGzipB64(content) {
   try {
-    const bytes = base64Decode(content);
+    const bytes = b64Decode(content);
     const ds = new DecompressionStream('gzip');
     const writer = ds.writable.getWriter();
     writer.write(bytes);
     writer.close();
     const result = await new Response(ds.readable).arrayBuffer();
-    const text = new TextDecoder('utf-8').decode(result).trim();
-    if (text.length > 5) return text;
+    return new TextDecoder('utf-8').decode(result).trim();
   } catch {}
   return null;
 }
 
 /**
- * 核心递归：清理 → 判断 → 解密 → 循环
+ * 单次解密处理：从一段清理后的文本中提取并尝试解密
  */
-async function deepDecrypt(rawInput, depth = 0) {
-  if (depth > 15) {
-    // 超过递归深度，返回清理后的文本
-    return cleanText(rawInput);
+async function processOnce(cleanedText) {
+  // 1. 尝试直接匹配 2423...2324
+  const patMatch = cleanedText.match(/2423[\s\S]*?2324/);
+  if (patMatch) {
+    const r = await try2423(patMatch[0]);
+    if (r) return r;
   }
 
-  // ===== 第一步：清理 =====
-  const cleaned = cleanText(rawInput);
-
-  // ===== 第二步：判断是否是 JSON 明文 =====
-  if (isPlainJson(cleaned)) {
-    // 格式化输出
-    try {
-      const obj = JSON.parse(cleaned);
-      return JSON.stringify(obj, null, 2);
-    } catch {
-      return cleaned;
-    }
-  }
-
-  // ===== 第三步：不是明文，尝试提取加密段 =====
-
-  // 3a. 提取所有看起来像 Base64 的长串
-  const b64Matches = cleaned.match(/[A-Za-z0-9+/=_-]{20,}/g) || [];
+  // 2. 提取 Base64 长串
+  const b64Matches = cleanedText.match(/[A-Za-z0-9+/=_-]{20,}/g) || [];
   for (const b64 of b64Matches) {
-    // 跳过明显是 PNG 头或其他垃圾
-    if (b64.startsWith('iVBOR') || b64.startsWith('89504E')) continue;
+    if (b64.startsWith('iVBOR') || b64.startsWith('89504E') || b64.startsWith('PHN2')) continue;
 
+    // 2a. 解码后递归判断
     try {
-      const decoded = base64Decode(b64);
-      const decodedText = new TextDecoder('utf-8').decode(decoded);
-
-      // 解码后是 2423 格式 → 解密
-      if (decodedText.includes('2423')) {
-        const decrypted = await tryDecrypt2423(decodedText);
-        if (decrypted) {
-          const result = await deepDecrypt(decrypted, depth + 1);
-          if (isPlainJson(cleanText(result))) return result;
-        }
+      const decoded = new TextDecoder('utf-8').decode(b64Decode(b64));
+      if (decoded.includes('2423')) {
+        const r = await try2423(decoded);
+        if (r) return r;
       }
-
-      // 解码后直接是 JSON
-      if (isPlainJson(cleanText(decodedText))) {
-        return JSON.stringify(JSON.parse(cleanText(decodedText)), null, 2);
-      }
-
-      // 解码后继续递归
-      const result = await deepDecrypt(decodedText, depth + 1);
-      if (isPlainJson(cleanText(result))) return result;
+      if (isJson(decoded)) return decoded;
+      // 返回解码文本让外层循环继续处理
+      return decoded;
     } catch {}
 
-    // 尝试 AES + Base64
-    try {
-      const aesResult = await tryAesBase64(b64);
-      if (aesResult) {
-        const result = await deepDecrypt(aesResult, depth + 1);
-        if (isPlainJson(cleanText(result))) return result;
-      }
-    } catch {}
+    // 2b. AES+Base64
+    const r1 = await tryAesB64(b64);
+    if (r1) return r1;
 
-    // 尝试 Gzip + Base64
-    try {
-      const gzipResult = await tryGzipBase64(b64);
-      if (gzipResult) {
-        const result = await deepDecrypt(gzipResult, depth + 1);
-        if (isPlainJson(cleanText(result))) return result;
-      }
-    } catch {}
+    // 2c. Gzip+Base64
+    const r2 = await tryGzipB64(b64);
+    if (r2) return r2;
   }
 
-  // 3b. 直接匹配 2423...2324 模式
-  const patternMatches = cleaned.match(/2423[\s\S]*?2324/g) || [];
-  for (const pat of patternMatches) {
-    const decrypted = await tryDecrypt2423(pat);
-    if (decrypted) {
-      const result = await deepDecrypt(decrypted, depth + 1);
-      if (isPlainJson(cleanText(result))) return result;
-    }
-  }
-
-  // 3c. 尝试整体 Base64
+  // 3. 整体当 Base64 试一次
   try {
-    const decoded = base64Decode(cleaned);
-    const decodedText = new TextDecoder('utf-8').decode(decoded);
-    const result = await deepDecrypt(decodedText, depth + 1);
-    if (isPlainJson(cleanText(result))) return result;
+    const decoded = new TextDecoder('utf-8').decode(b64Decode(cleanedText));
+    return decoded;
   } catch {}
 
-  // ===== 全部失败，返回清理后的文本 =====
-  return cleaned;
+  return null;
+}
+
+/**
+ * 核心循环：清理 → 处理 → 判断JSON → 不是就重复
+ */
+async function decryptLoop(rawInput, depth = 0) {
+  if (depth > 20) {
+    // 超过深度，返回最后清理结果
+    return clean(rawInput);
+  }
+
+  // ★ 第一步：清理（每次都先执行）
+  const cleaned = clean(rawInput);
+
+  // 已经是 JSON 明文？直接格式化返回
+  if (isJson(cleaned)) {
+    return JSON.stringify(JSON.parse(cleaned), null, 2);
+  }
+
+  // ★ 第二步：处理解密
+  const processed = await processOnce(cleaned);
+
+  if (!processed || processed === cleaned) {
+    // 解密没产出新内容，返回当前清理结果
+    return cleaned;
+  }
+
+  // ★ 第三步：判断结果
+  const processedClean = clean(processed);
+  if (isJson(processedClean)) {
+    return JSON.stringify(JSON.parse(processedClean), null, 2);
+  }
+
+  // ★ 不是 JSON → 重复：回到第一步（清理 → 处理 → 判断）
+  return decryptLoop(processed, depth + 1);
 }
 
 /**
  * 路径补全
  */
-function absolutizeJson(jsonStr, baseUrl) {
+function absolutize(jsonStr, baseUrl) {
   try {
     const obj = JSON.parse(jsonStr);
     const base = new URL(baseUrl);
@@ -269,7 +228,7 @@ function absolutizeJson(jsonStr, baseUrl) {
       if (node && typeof node === 'object') {
         const result = {};
         for (const [k, v] of Object.entries(node)) {
-          if (typeof v === 'string' && (k === 'url' || k === 'link' || k === 'src' || k === 'pic' || k === 'img' || k.endsWith('Url') || k.endsWith('Link'))) {
+          if (typeof v === 'string' && /^(url|link|src|pic|img|.*Url|.*Link)$/i.test(k)) {
             try { result[k] = new URL(v, base).toString(); } catch { result[k] = v; }
           } else {
             result[k] = resolve(v);
@@ -286,26 +245,18 @@ function absolutizeJson(jsonStr, baseUrl) {
 }
 
 /**
- * 主入口：decryptAndProcess
- * 流程：拿到原始文本 → 清理 → 递归解密 → 路径补全 → 返回
+ * 主入口
  */
 export async function decryptAndProcess(rawText, sourceUrl) {
-  // 递归解密（内部每一步都会先 cleanText）
-  let result = await deepDecrypt(rawText, 0);
+  // 循环解密（内部每一步都先 clean）
+  let result = await decryptLoop(rawText, 0);
 
-  // 最终清理一次
-  const finalCleaned = cleanText(result);
-
-  // 如果是 JSON，做路径补全
-  if (isPlainJson(finalCleaned)) {
-    try {
-      const formatted = JSON.stringify(JSON.parse(finalCleaned), null, 2);
-      return absolutizeJson(formatted, sourceUrl);
-    } catch {
-      return result;
-    }
+  // 最终判断：如果是 JSON 就路径补全
+  const finalClean = clean(result);
+  if (isJson(finalClean)) {
+    return absolutize(JSON.stringify(JSON.parse(finalClean), null, 2), sourceUrl);
   }
 
-  // 不是 JSON，返回清理后的文本（至少没有换行空格了）
+  // 不是 JSON，返回清理后的文本
   return result;
 }
