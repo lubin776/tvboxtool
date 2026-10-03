@@ -1,16 +1,13 @@
 // ============================================================
 // CF Pages Function: /api/fetch
-// 模拟 TVBox 访问，逐个 UA 尝试，流式返回
-// 已加 CORS，支持前端部署在其他服务器
-// 不做 Content-Type 过滤，任何响应都读成文本交给 decode 层
 // ============================================================
 
 import { decryptAndProcess } from '../lib/decrypt.js';
 
-/* ============ CORS 白名单（改成你的域名） ============ */
+/* ============ CORS 白名单 ============ */
 const ALLOWED_ORIGINS = [
-  "https://2.cdz.qzz.io",          // A 版（同源）
-  "https://你的前端域名.com",       // ← B 版，改成真的
+  "https://你的前端域名.com",      // ← B 版前端真实域名
+  "https://2.cdz.qzz.io",          // ← A 版（如果还在用）
   "http://localhost:3000",
   "http://localhost:5173",
   "http://localhost:8080",
@@ -66,7 +63,6 @@ async function tryFetchOnce(targetUrl, uaInfo) {
 
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
-    // 不做任何 Content-Type 过滤，原样读成文本
     const text = await resp.text();
     if (!text || text.length < 5) throw new Error("响应内容过短");
 
@@ -119,7 +115,7 @@ export async function onRequestPost(context) {
     queue = Object.values(UA_LIBRARY).filter(u => !isBrowserUA(u.ua));
   }
 
-  // 浏览器 UA 强制置后
+  // 浏览器 UA 置后
   const browserItems = queue.filter(u => isBrowserUA(u.ua));
   const nonBrowserItems = queue.filter(u => !isBrowserUA(u.ua));
   queue = [...nonBrowserItems, ...browserItems];
@@ -149,8 +145,6 @@ export async function onRequestPost(context) {
 
       try {
         const result = await tryFetchOnce(target, uaInfo);
-
-        // ===== 后置处理：删注释/删空白/多层解码 =====
         const { data: processed, trace } = await decryptAndProcess(result.data, target);
 
         send({
