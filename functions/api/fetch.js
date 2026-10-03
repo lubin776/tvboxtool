@@ -1,30 +1,31 @@
-// 默认 UA 库
+// ============================================================
+// CF Pages Function: /api/fetch
+// 模拟 TVBox 访问，逐个 UA 尝试，流式返回
+// ============================================================
+
+import { decryptAndProcess } from '../lib/decrypt.js';
+
 const UA_LIBRARY = {
-  okhttp3: { ua: "okhttp/3.15", xrw: "" },
-  android10: { ua: "Dalvik/2.1.0 (Linux; U; Android 10; MI 9 Build/QKQ1.190825.002)", xrw: "com.tvbox.osc" },
-  android11: { ua: "Dalvik/2.1.0 (Linux; U; Android 11; Pixel 5 Build/RQ3A.210805.001)", xrw: "com.tvbox.osc" },
-  android12: { ua: "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)", xrw: "com.tvbox.osc" },
-  chrome: { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36", xrw: "" },
-  edge: { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36 Edg/115.0.0.0", xrw: "" },
-  firefox: { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0", xrw: "" },
-  safari: { ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1", xrw: "" }
+  "okhttp315": { ua: "okhttp/3.15", xrw: "com.iptvbox" },
+  "okhttp493": { ua: "okhttp/4.9.3", xrw: "com.iptvbox" },
+  "tvbox100":  { ua: "TVBox/1.0.0", xrw: "com.iptvbox" },
+  "tvboxgit":  { ua: "com.github.tvbox", xrw: "com.iptvbox" },
+  "dalvik":    { ua: "Dalvik/2.1.0 (Linux; U; Android 9; Pixel 3 XL Build/PQ3A.190801.002)", xrw: "com.iptvbox" },
+  "chrome":    { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", xrw: "" },
+  "firefox":   { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0", xrw: "" },
+  "safari":    { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15", xrw: "" },
 };
 
-function isBrowserUA(ua) {
-  return /Mozilla|Chrome|Safari|Firefox|Edge/i.test(ua);
-}
+const BROWSER_KEYWORDS = ["Mozilla", "Chrome", "Firefox", "Safari", "Edge"];
 
-// 简单的解密占位函数（保持你原有的逻辑）
-async function decryptAndProcess(data, target) {
-  // 这里假设你原有解密逻辑，直接返回原数据如果不需要解密
-  return data; 
+function isBrowserUA(ua) {
+  return BROWSER_KEYWORDS.some(kw => ua.includes(kw));
 }
 
 async function tryFetchOnce(targetUrl, uaInfo) {
   const headers = {
     "User-Agent": uaInfo.ua,
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Connection": "keep-alive",
   };
   if (uaInfo.xrw) headers["X-Requested-With"] = uaInfo.xrw;
@@ -42,11 +43,7 @@ async function tryFetchOnce(targetUrl, uaInfo) {
 
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
-    // ===== 修复中文乱码核心代码 =====
-    const arrayBuffer = await resp.arrayBuffer();
-    const text = new TextDecoder("utf-8").decode(arrayBuffer);
-    // =============================
-
+    const text = await resp.text();
     if (!text || text.length < 20) throw new Error("响应内容过短");
     if (text.trim().startsWith("<!DOCTYPE html") || text.trim().startsWith("<html")) {
       throw new Error("返回了 HTML 页面而非接口数据");
@@ -73,6 +70,7 @@ export async function onRequestPost(context) {
     return new Response(JSON.stringify({ error: "缺少 target 参数" }), { status: 400 });
   }
 
+  // 构建 UA 队列
   let queue = [];
   if (selectedUas && selectedUas.length > 0) {
     for (const item of selectedUas) {
@@ -86,6 +84,7 @@ export async function onRequestPost(context) {
     queue = Object.values(UA_LIBRARY).filter(u => !isBrowserUA(u.ua));
   }
 
+  // 浏览器 UA 强制置后
   const browserItems = queue.filter(u => isBrowserUA(u.ua));
   const nonBrowserItems = queue.filter(u => !isBrowserUA(u.ua));
   queue = [...nonBrowserItems, ...browserItems];
@@ -94,6 +93,7 @@ export async function onRequestPost(context) {
     return new Response(JSON.stringify({ error: "UA 队列为空" }), { status: 400 });
   }
 
+  // 流式响应
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
   const encoder = new TextEncoder();
@@ -111,8 +111,8 @@ export async function onRequestPost(context) {
 
       try {
         const result = await tryFetchOnce(target, uaInfo);
-        
-        // 解密处理 (await 已修复)
+
+        // ===== 解密处理（await 已修复）=====
         const processed = await decryptAndProcess(result.data, target);
 
         send({
@@ -122,6 +122,9 @@ export async function onRequestPost(context) {
           dataLength: processed.length,
         });
         send({ type: "data", content: processed });
+        // ===========================
+
+        break;
       } catch (err) {
         send({ type: "failed", ua: uaInfo.ua, error: err.message });
       }
@@ -133,7 +136,7 @@ export async function onRequestPost(context) {
 
   return new Response(readable, {
     headers: {
-      "Content-Type": "application/json; charset=utf-8", // 明确声明 UTF-8
+      "Content-Type": "application/json; charset=utf-8",
       "Transfer-Encoding": "chunked",
     },
   });
