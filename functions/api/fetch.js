@@ -42,7 +42,13 @@ function isBrowserUA(ua) {
   return BROWSER_KEYWORDS.some(kw => ua.includes(kw));
 }
 
+/* ============ 单次抓取（含中文 URL 编码） ============ */
 async function tryFetchOnce(targetUrl, uaInfo) {
+  // ★ 中文 / 特殊字符 URL 编码
+  try {
+    targetUrl = encodeURI(targetUrl);
+  } catch {}
+
   const headers = {
     "User-Agent": uaInfo.ua,
     "Accept": "*/*",
