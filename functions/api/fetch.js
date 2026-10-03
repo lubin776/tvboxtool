@@ -1,10 +1,31 @@
 // ============================================================
 // CF Pages Function: /api/fetch
 // 模拟 TVBox 访问，逐个 UA 尝试，流式返回
+// 已加 CORS，支持前端部署在其他服务器
 // ============================================================
 
 import { decryptAndProcess } from '../lib/decrypt.js';
 
+/* ============ CORS 白名单（改成你的前端域名） ============ */
+const ALLOWED_ORIGINS = [
+  "https://你的前端域名.com",     // ← 改成你的前端域名
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "http://localhost:8080",
+  "http://127.0.0.1:5500",        // VSCode Live Server
+];
+
+function corsHeaders(origin) {
+  const allow = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  return {
+    "Access-Control-Allow-Origin": allow,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "86400",
+  };
+}
+
+/* ============ UA 库 ============ */
 const UA_LIBRARY = {
   "okhttp315": { ua: "okhttp/3.15", xrw: "com.iptvbox" },
   "okhttp493": { ua: "okhttp/4.9.3", xrw: "com.iptvbox" },
@@ -56,18 +77,27 @@ async function tryFetchOnce(targetUrl, uaInfo) {
   }
 }
 
+/* ============ POST /api/fetch ============ */
 export async function onRequestPost(context) {
   const { request } = context;
+  const origin = request.headers.get("Origin") || "";
+
   let body;
   try {
     body = await request.json();
   } catch {
-    return new Response(JSON.stringify({ error: "无效的 JSON" }), { status: 400 });
+    return new Response(JSON.stringify({ error: "无效的 JSON" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+    });
   }
 
   const { target, uas: selectedUas } = body;
   if (!target) {
-    return new Response(JSON.stringify({ error: "缺少 target 参数" }), { status: 400 });
+    return new Response(JSON.stringify({ error: "缺少 target 参数" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+    });
   }
 
   // 构建 UA 队列
@@ -90,7 +120,10 @@ export async function onRequestPost(context) {
   queue = [...nonBrowserItems, ...browserItems];
 
   if (queue.length === 0) {
-    return new Response(JSON.stringify({ error: "UA 队列为空" }), { status: 400 });
+    return new Response(JSON.stringify({ error: "UA 队列为空" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", ...corsHeaders(origin) },
+    });
   }
 
   // 流式响应
@@ -111,8 +144,6 @@ export async function onRequestPost(context) {
 
       try {
         const result = await tryFetchOnce(target, uaInfo);
-
-        // ===== 解密处理（await 已修复）=====
         const processed = await decryptAndProcess(result.data, target);
 
         send({
@@ -122,8 +153,6 @@ export async function onRequestPost(context) {
           dataLength: processed.length,
         });
         send({ type: "data", content: processed });
-        // ===========================
-
         break;
       } catch (err) {
         send({ type: "failed", ua: uaInfo.ua, error: err.message });
@@ -138,16 +167,18 @@ export async function onRequestPost(context) {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Transfer-Encoding": "chunked",
+      "X-Accel-Buffering": "no",
+      "Cache-Control": "no-cache",
+      ...corsHeaders(origin),
     },
   });
 }
 
-export async function onRequestOptions() {
+/* ============ OPTIONS 预检 ============ */
+export async function onRequestOptions(context) {
+  const origin = context.request.headers.get("Origin") || "";
   return new Response(null, {
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    },
+    status: 204,
+    headers: corsHeaders(origin),
   });
 }
