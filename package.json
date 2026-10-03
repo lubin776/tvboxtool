@@ -1,0 +1,13 @@
+{
+  "name": "tvbox-tool",
+  "version": "1.0.0",
+  "description": "TVBox 接口抓取工具 - 模拟 TVBox 访问环境 + 解密处理",
+  "scripts": {
+    "test": "node scripts/test-decrypt.js",
+    "dev": "npx wrangler pages dev static --compatibility-date=2024-01-01",
+    "deploy": "npx wrangler pages deploy static"
+  },
+  "keywords": ["tvbox", "iptv", "cloudflare", "decrypt"],
+  "author": "",
+  "license": "MIT"
+}

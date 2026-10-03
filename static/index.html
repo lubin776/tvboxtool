@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TVBox 接口抓取工具</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="container">
+  <h1>📺 TVBox 接口抓取工具</h1>
+
+  <div class="card">
+    <label>目标接口 URL</label>
+    <input type="text" id="target" placeholder="https://example.com/api.json">
+
+    <label>UA 指纹选择</label>
+    <div class="ua-controls">
+      <button onclick="selectAll()">全选</button>
+      <button onclick="selectNone()">全不选</button>
+      <button onclick="selectTvbox()">仅 TVBox</button>
+      <button onclick="selectWithBrowser()">TVBox + 浏览器兜底</button>
+    </div>
+    <div class="ua-list" id="uaList"></div>
+
+    <button class="primary" id="startBtn" onclick="startFetch()">🚀 开始抓取</button>
+  </div>
+
+  <div class="card">
+    <div class="log-header">
+      <span>实时日志</span>
+      <button class="small" onclick="clearLog()">清空</button>
+    </div>
+    <div class="log" id="log"></div>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none;">
+    <div class="log-header">
+      <span>响应数据（已解密）</span>
+      <div>
+        <button class="small" onclick="copyData()">复制</button>
+        <button class="small" onclick="downloadData()">下载 JSON</button>
+      </div>
+    </div>
+    <pre class="result" id="result"></pre>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
