@@ -1,7 +1,7 @@
 // ============================================================
 // TVBox 解密工具库 (最终版)
-// 核心：每一轮 → 删注释 → 删所有空白 → 还原Unicode → 试解码
-//       直到拿到明文 JSON，或一轮无变化则停止
+// 每轮：删注释 → 删所有空白 → 还原Unicode → 试解码 → 试可打印片段抽取
+// 直到拿到明文 JSON，或一轮无变化则停止
 // ============================================================
 
 /* ================= 基础工具 ================= */
@@ -55,7 +55,7 @@ function looksLikeJson(text) {
   try { JSON.parse(t); return true; } catch { return false; }
 }
 
-/* ================= 第1步：删注释（字符串感知，不误伤 http://） ================= */
+/* ================= 第1步：删注释（字符串感知） ================= */
 
 function stripComments(input) {
   let out = "";
@@ -81,13 +81,13 @@ function stripComments(input) {
   return out;
 }
 
-/* ================= 第2步：删所有空白（换行/空格/tab） ================= */
+/* ================= 第2步：删所有空白 ================= */
 
 function stripAllWhitespace(input) {
   return input.replace(/[\s\uFEFF\u200B]+/g, "");
 }
 
-/* ================= 第3步：还原 Unicode 转义 ================= */
+/* ================= 第3步：还原 Unicode ================= */
 
 function restoreUnicodeEscape(str) {
   if (typeof str !== "string") return str;
@@ -113,10 +113,38 @@ function deepRestoreUnicode(node) {
   return node;
 }
 
-/* ================= 剥离二进制噪声 ================= */
+/* ================= 第4步：从二进制乱码里抽可打印片段 ================= */
 
-function stripBinaryNoise(text) {
-  return text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
+/**
+ * 从文本中抽取所有"像 base64 / 像 URL 编码 / 像 JSON"的长片段
+ * 用于处理：图片二进制被 resp.text() 读成乱码后，里面还藏着可解码文本的情况
+ */
+function extractPrintableSegments(text) {
+  const found = [];
+
+  // 1) base64 片段（长度 ≥ 32，只含 base64 字符）
+  const b64Re = /[A-Za-z0-9+/=]{32,}/g;
+  let m;
+  while ((m = b64Re.exec(text)) !== null) {
+    found.push({ type: "base64", value: m[0] });
+    if (found.length > 50) break;
+  }
+
+  // 2) URL 编码片段（含多个 %XX）
+  const urlRe = /(?:%[0-9A-Fa-f]{2}){4,}[^\s]*/g;
+  while ((m = urlRe.exec(text)) !== null) {
+    found.push({ type: "url", value: m[0] });
+    if (found.length > 80) break;
+  }
+
+  // 3) 直接嵌在文本里的 JSON 片段
+  const jsonRe = /[\[{][^\x00-\x1F]{20,}[\]}]/g;
+  while ((m = jsonRe.exec(text)) !== null) {
+    found.push({ type: "json", value: m[0] });
+    if (found.length > 100) break;
+  }
+
+  return found;
 }
 
 /* ================= 单个解码器 ================= */
@@ -238,16 +266,22 @@ function extractJsonFragment(text) {
 }
 
 /* ============================================================
-   核心：多层循环解码
+   核心：多层循环
+   每轮顺序：
+     1) 删注释
+     2) 删所有空白
+     3) 还原 Unicode
+     4) 是 JSON？→ 返回
+     5) 试所有解码器（2423 / AES / Gzip / URL / Base64）
+     6) 试"可打印片段抽取"（从二进制乱码里捞 base64）
+     7) 本轮无任何变化 → 停止
    ============================================================ */
 
-const MAX_ROUNDS = 10;
+const MAX_ROUNDS = 12;
 const MIN_TEXT_LEN = 6;
 
 async function decodeLoop(rawText, trace) {
   let current = (typeof rawText === "string" ? rawText : new TextDecoder().decode(rawText));
-
-  current = stripBinaryNoise(current);
 
   for (let round = 1; round <= MAX_ROUNDS; round++) {
     const before = current;
@@ -273,7 +307,7 @@ async function decodeLoop(rawText, trace) {
       return current;
     }
 
-    // 5) 依次尝试所有解码器
+    // 5) 依次尝试所有整体解码器
     const decoders = [
       { name: "2423hex",    fn: decode2423Hex },
       { name: "2423plain",  fn: decode2423Plain },
@@ -296,7 +330,39 @@ async function decodeLoop(rawText, trace) {
       } catch {}
     }
 
-    // 6) 本轮无任何变化 → 停止
+    // 6) 若整体解码没进展，尝试"从乱码里捞片段"
+    if (!advanced) {
+      const segs = extractPrintableSegments(current);
+      for (const seg of segs) {
+        if (seg.type === "json") {
+          try {
+            JSON.parse(seg.value);
+            trace.push(`R${round}: 捞到内嵌 JSON`);
+            current = seg.value;
+            advanced = true;
+            break;
+          } catch {}
+        } else if (seg.type === "base64") {
+          const out = await decodeBase64(seg.value);
+          if (out && out !== current) {
+            trace.push(`R${round}: 捞到 base64 片段 (${seg.value.length}→${out.length})`);
+            current = out;
+            advanced = true;
+            break;
+          }
+        } else if (seg.type === "url") {
+          const out = decodeUrl(seg.value);
+          if (out && out !== current) {
+            trace.push(`R${round}: 捞到 url 片段`);
+            current = out;
+            advanced = true;
+            break;
+          }
+        }
+      }
+    }
+
+    // 7) 本轮无任何变化 → 停止
     if (!advanced && current === before) {
       trace.push(`R${round}: 无进展，停止`);
       break;
