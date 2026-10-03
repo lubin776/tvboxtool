@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TVBox 接口抓取工具 · 跨域版</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: #0f172a; color: #e2e8f0; min-height: 100vh; padding: 20px; }
+  .container { max-width: 900px; margin: 0 auto; }
+  h1 { text-align: center; margin-bottom: 24px; color: #f8fafc; }
+
+  .card { background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+  label { display: block; margin-bottom: 6px; font-weight: 600; color: #cbd5e1; }
+  input[type="text"] { width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid #334155;
+                       background: #0f172a; color: #e2e8f0; margin-bottom: 16px; font-size: 14px; }
+
+  .ua-controls { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .ua-controls button { padding: 6px 12px; border-radius: 6px; border: 1px solid #475569;
+                        background: #334155; color: #e2e8f0; cursor: pointer; font-size: 12px; }
+  .ua-controls button:hover { background: #475569; }
+  .ua-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px;
+             max-height: 200px; overflow-y: auto; }
+  .ua-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+             background: #0f172a; border-radius: 6px; }
+  .ua-item input { cursor: pointer; }
+  .ua-item span { font-size: 12px; font-family: monospace; color: #94a3b8; }
+
+  .primary { width: 100%; padding: 14px; border-radius: 10px; border: none;
+             background: linear-gradient(135deg, #3b82f6, #6366f1); color: white;
+             font-size: 16px; font-weight: 600; cursor: pointer; }
+  .primary:hover { opacity: 0.9; }
+  .primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .log-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .log-header span { font-weight: 600; }
+  .log-header .actions, .modal-header .actions { display: flex; gap: 8px; }
+  .small { padding: 4px 10px; border-radius: 4px; border: 1px solid #475569;
+           background: #334155; color: #e2e8f0; cursor: pointer; font-size: 12px; }
+  .small:hover { background: #475569; }
+
+  .log { background: #0f172a; border-radius: 8px; padding: 12px; height: 300px;
+         overflow-y: auto; font-family: monospace; font-size: 13px; line-height: 1.6; }
+  .log .trying { color: #fbbf24; }
+  .log .failed { color: #ef4444; }
+  .log .success { color: #22c55e; }
+  .log .info { color: #94a3b8; }
+  .log .error { color: #ef4444; font-weight: bold; }
+  .log .trace { color: #38bdf8; }
+
+  .stats { font-size: 12px; color: #94a3b8; margin-bottom: 8px; }
+  .stats b { color: #22c55e; }
+
+  .result { background: #0f172a; border-radius: 8px; padding: 12px; max-height: 400px;
+            overflow-y: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all;
+            cursor: pointer; }
+  .preview-hint { text-align: center; font-size: 12px; color: #fbbf24;
+                  margin-top: 8px; cursor: pointer; }
+  .preview-hint:hover { text-decoration: underline; }
+
+  .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75);
+           z-index: 99; padding: 24px; }
+  .modal.show { display: flex; align-items: center; justify-content: center; }
+  .modal-box { background: #1e293b; border-radius: 12px; width: 100%; max-width: 1100px;
+               max-height: 90vh; display: flex; flex-direction: column; }
+  .modal-header { padding: 14px 18px; border-bottom: 1px solid #334155;
+                  display: flex; justify-content: space-between; align-items: center; }
+  .modal-body { padding: 16px; overflow: auto; font-family: monospace; font-size: 12px;
+                white-space: pre-wrap; word-break: break-all; flex: 1; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📺 TVBox 接口抓取工具 <small style="font-size:12px;color:#64748b;">(跨域版)</small></h1>
+
+  <div class="card">
+    <label>目标接口 URL</label>
+    <input type="text" id="target" placeholder="https://example.com/api.json">
+
+    <label>UA 指纹选择</label>
+    <div class="ua-controls">
+      <button onclick="selectAll()">全选</button>
+      <button onclick="selectNone()">全不选</button>
+      <button onclick="selectTvbox()">仅 TVBox</button>
+      <button onclick="selectWithBrowser()">TVBox + 浏览器兜底</button>
+    </div>
+    <div class="ua-list" id="uaList"></div>
+
+    <button class="primary" id="startBtn" onclick="startFetch()">🚀 开始抓取</button>
+  </div>
+
+  <div class="card">
+    <div class="log-header">
+      <span>实时日志</span>
+      <button class="small" onclick="clearLog()">清空</button>
+    </div>
+    <div class="log" id="log"></div>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none;">
+    <div class="log-header">
+      <span>响应数据（已解密 / 已格式化）</span>
+      <div class="actions">
+        <button class="small" onclick="openFullJson()">↗ 查看完整 JSON</button>
+        <button class="small" onclick="copyData()">复制</button>
+        <button class="small" onclick="downloadData()">下载 JSON</button>
+      </div>
+    </div>
+    <div class="stats" id="stats"></div>
+    <pre class="result" id="result" onclick="openFullJson()" title="点击查看完整 JSON"></pre>
+    <div class="preview-hint" id="previewHint" style="display:none;" onclick="openFullJson()"></div>
+  </div>
+</div>
+
+<div class="modal" id="jsonModal" onclick="if(event.target===this)closeModal()">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span>完整 JSON</span>
+      <div class="actions">
+        <button class="small" onclick="copyData()">复制</button>
+        <button class="small" onclick="downloadData()">下载</button>
+        <button class="small" onclick="closeModal()">关闭 (Esc)</button>
+      </div>
+    </div>
+    <pre class="modal-body" id="modalBody"></pre>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// B 版：部署在别的服务器（跨域调用后端）
+// 后端地址写死为真实后端域名
+// ============================================================
+
+const BACKEND_BASE = "https://2.cdz.qzz.io";   // ← B 版唯一区别
+const PREVIEW_LIMIT = 2000;
+
+const UA_OPTIONS = [
+  { id: "okhttp315", label: "okhttp/3.15 (TVBox)" },
+  { id: "okhttp493", label: "okhttp/4.9.3 (TVBox)" },
+  { id: "tvbox100",  label: "TVBox/1.0.0" },
+  { id: "tvboxgit",  label: "com.github.tvbox" },
+  { id: "dalvik",    label: "Dalvik/2.1.0 (Android 9)" },
+  { id: "chrome",    label: "Chrome (浏览器兜底)" },
+  { id: "firefox",   label: "Firefox (浏览器兜底)" },
+  { id: "safari",    label: "Safari (浏览器兜底)" },
+];
+
+let fetchedData = "";
+
+function renderUaList() {
+  const list = document.getElementById("uaList");
+  list.innerHTML = UA_OPTIONS.map(opt => `
+    <label class="ua-item">
+      <input type="checkbox" value="${opt.id}" checked>
+      <span>${opt.label}</span>
+    </label>
+  `).join("");
+}
+renderUaList();
+
+function getSelectedUas() {
+  return Array.from(document.querySelectorAll(".ua-item input:checked")).map(cb => cb.value);
+}
+function selectAll() { document.querySelectorAll(".ua-item input").forEach(cb => cb.checked = true); }
+function selectNone() { document.querySelectorAll(".ua-item input").forEach(cb => cb.checked = false); }
+function selectTvbox() {
+  selectNone();
+  ["okhttp315","okhttp493","tvbox100","tvboxgit","dalvik"].forEach(id => {
+    const cb = document.querySelector(`.ua-item input[value="${id}"]`);
+    if (cb) cb.checked = true;
+  });
+}
+function selectWithBrowser() {
+  selectTvbox();
+  ["chrome","firefox","safari"].forEach(id => {
+    const cb = document.querySelector(`.ua-item input[value="${id}"]`);
+    if (cb) cb.checked = true;
+  });
+}
+
+function log(msg, type = "info") {
+  const el = document.getElementById("log");
+  const div = document.createElement("div");
+  div.className = type;
+  const time = new Date().toLocaleTimeString();
+  div.textContent = `[${time}] ${msg}`;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+function clearLog() { document.getElementById("log").innerHTML = ""; }
+
+async function startFetch() {
+  const target = document.getElementById("target").value.trim();
+  if (!target) { alert("请输入目标接口 URL"); return; }
+
+  const selected = getSelectedUas();
+  if (selected.length === 0) { alert("请至少选择一个 UA"); return; }
+
+  const btn = document.getElementById("startBtn");
+  btn.disabled = true;
+  document.getElementById("resultCard").style.display = "none";
+  fetchedData = "";
+  clearLog();
+
+  log(`目标: ${target}`, "info");
+  log(`已选 UA: ${selected.length} 个`, "info");
+  log(`后端: ${BACKEND_BASE}`, "info");
+
+  try {
+    const response = await fetch(`${BACKEND_BASE}/api/fetch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target, uas: selected }),
+    });
+
+    if (!response.ok) {
+      log(`请求失败: HTTP ${response.status}`, "error");
+      btn.disabled = false;
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
+
+        switch (msg.type) {
+          case "start":
+            log(`开始尝试，共 ${msg.total} 个 UA`, "info");
+            break;
+          case "trying":
+            log(`[${msg.index}/${msg.total}] 尝试: ${msg.ua.slice(0, 50)}...`, "trying");
+            break;
+          case "failed":
+            log(`✗ ${msg.ua.slice(0, 30)}... → ${msg.error}`, "failed");
+            break;
+          case "success":
+            log(`✓ 成功! UA: ${msg.ua.slice(0, 40)}`, "success");
+            break;
+          case "trace":
+            if (Array.isArray(msg.steps) && msg.steps.length) {
+              log(`  ↳ 解码轨迹: ${msg.steps.join(" → ")}`, "trace");
+            }
+            break;
+          case "data":
+            fetchedData = msg.content;
+            renderResult(msg.content);
+            break;
+          case "error":
+            log(`✗ ${msg.message}`, "error");
+            break;
+          case "end":
+            log("完成", "info");
+            break;
+        }
+      }
+    }
+  } catch (err) {
+    log(`连接错误: ${err.message}`, "error");
+    log(`若是 CORS 错误：确认后端已放行当前域名`, "error");
+  }
+
+  btn.disabled = false;
+}
+
+function renderResult(text) {
+  const resultEl = document.getElementById("result");
+  const hintEl = document.getElementById("previewHint");
+  const statsEl = document.getElementById("stats");
+  const lines = text.split("\n").length;
+
+  statsEl.innerHTML = `字符数 <b>${text.length}</b> · 行数 <b>${lines}</b>`;
+
+  if (text.length > PREVIEW_LIMIT) {
+    resultEl.textContent = text.slice(0, PREVIEW_LIMIT);
+    hintEl.style.display = "block";
+    hintEl.textContent = `仅显示前 ${PREVIEW_LIMIT} 字符，点击查看完整 JSON ↓`;
+  } else {
+    resultEl.textContent = text;
+    hintEl.style.display = "none";
+  }
+
+  document.getElementById("resultCard").style.display = "block";
+}
+
+function openFullJson() {
+  if (!fetchedData) return;
+  document.getElementById("modalBody").textContent = fetchedData;
+  document.getElementById("jsonModal").classList.add("show");
+}
+function closeModal() {
+  document.getElementById("jsonModal").classList.remove("show");
+}
+
+function copyData() {
+  if (!fetchedData) return;
+  navigator.clipboard.writeText(fetchedData).then(
+    () => log("已复制到剪贴板", "success"),
+    () => log("复制失败（浏览器可能禁止）", "error")
+  );
+}
+function downloadData() {
+  if (!fetchedData) return;
+  const blob = new Blob([fetchedData], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `tvbox_api_${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal(); });
+</script>
+</body>
+</html>
