@@ -1,21 +1,39 @@
 // ============================================================
-// TVBox 解密工具库 (最终版)
-// 每轮：删注释 → 删所有空白 → 还原Unicode → 试解码 → 试可打印片段抽取
-// 直到拿到明文 JSON，或一轮无变化则停止
+// TVBox 解密工具库
+// 完整移植 Python 版 find_result / _try_decrypt_2423_hex / _try_decrypt_2423_plain
+// + 多层循环：每轮先删注释/删空白/还原Unicode，再试解码
 // ============================================================
 
 /* ================= 基础工具 ================= */
 
 function hexToBytes(hex) {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+  if (typeof hex !== "string") throw new Error("not string");
+  const clean = hex.replace(/\s+/g, "");
+  if (clean.length % 2 !== 0) throw new Error("odd length");
+  if (!/^[0-9a-fA-F]*$/.test(clean)) throw new Error("not hex");
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < clean.length; i += 2) {
+    bytes[i / 2] = parseInt(clean.substr(i, 2), 16);
   }
   return bytes;
 }
 
 function bytesToHex(bytes) {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function latin1FromHex(hex) {
+  if (hex.length % 2 !== 0) throw new Error("odd hex");
+  let s = "";
+  for (let i = 0; i < hex.length; i += 2) {
+    s += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+  }
+  return s;
+}
+
+function rightPad(s, ch, length) {
+  if (s.length >= length) return s.slice(0, length);
+  return s + ch.repeat(length - s.length);
 }
 
 function base64Decode(str) {
@@ -55,7 +73,7 @@ function looksLikeJson(text) {
   try { JSON.parse(t); return true; } catch { return false; }
 }
 
-/* ================= 第1步：删注释（字符串感知） ================= */
+/* ================= 删注释（字符串感知） ================= */
 
 function stripComments(input) {
   let out = "";
@@ -81,13 +99,13 @@ function stripComments(input) {
   return out;
 }
 
-/* ================= 第2步：删所有空白 ================= */
+/* ================= 删所有空白 ================= */
 
 function stripAllWhitespace(input) {
   return input.replace(/[\s\uFEFF\u200B]+/g, "");
 }
 
-/* ================= 第3步：还原 Unicode ================= */
+/* ================= 还原 Unicode ================= */
 
 function restoreUnicodeEscape(str) {
   if (typeof str !== "string") return str;
@@ -113,31 +131,34 @@ function deepRestoreUnicode(node) {
   return node;
 }
 
-/* ================= 第4步：从二进制乱码里抽可打印片段 ================= */
+/* ================= 从二进制乱码里抽可打印片段 ================= */
 
-/**
- * 从文本中抽取所有"像 base64 / 像 URL 编码 / 像 JSON"的长片段
- * 用于处理：图片二进制被 resp.text() 读成乱码后，里面还藏着可解码文本的情况
- */
 function extractPrintableSegments(text) {
   const found = [];
 
-  // 1) base64 片段（长度 ≥ 32，只含 base64 字符）
-  const b64Re = /[A-Za-z0-9+/=]{32,}/g;
+  // 1) 2423...2324 结构片段（优先）
+  const re2423 = /2423[0-9a-fA-F]{8,}2324[0-9a-fA-F]{20,}/g;
   let m;
+  while ((m = re2423.exec(text)) !== null) {
+    found.push({ type: "2423", value: m[0] });
+    if (found.length > 20) break;
+  }
+
+  // 2) base64 片段（长度 ≥ 32）
+  const b64Re = /[A-Za-z0-9+/=]{32,}/g;
   while ((m = b64Re.exec(text)) !== null) {
     found.push({ type: "base64", value: m[0] });
     if (found.length > 50) break;
   }
 
-  // 2) URL 编码片段（含多个 %XX）
+  // 3) URL 编码片段
   const urlRe = /(?:%[0-9A-Fa-f]{2}){4,}[^\s]*/g;
   while ((m = urlRe.exec(text)) !== null) {
     found.push({ type: "url", value: m[0] });
     if (found.length > 80) break;
   }
 
-  // 3) 直接嵌在文本里的 JSON 片段
+  // 4) 内嵌 JSON
   const jsonRe = /[\[{][^\x00-\x1F]{20,}[\]}]/g;
   while ((m = jsonRe.exec(text)) !== null) {
     found.push({ type: "json", value: m[0] });
@@ -147,47 +168,96 @@ function extractPrintableSegments(text) {
   return found;
 }
 
-/* ================= 单个解码器 ================= */
+/* ================= 2423 hex（完整移植 Python） ================= */
 
 async function decode2423Hex(content) {
-  const m = content.match(/^2423([0-9a-fA-F]+)2324/);
-  if (!m) return null;
-  const hex = m[1];
-  if (hex.length < 32) return null;
-  const bytes = hexToBytes(hex);
-  const iv = bytes.slice(0, 16);
-  const cipher = bytes.slice(16);
-  const keys = [
-    new TextEncoder().encode("1234567890123456"),
-    new TextEncoder().encode("tvbox1234567890"),
-    new TextEncoder().encode("iptvbox12345678"),
-    iv,
-  ];
-  for (const key of keys) {
-    try {
-      const plain = await aes128Decrypt(cipher.buffer, key.slice(0, 16), iv);
-      const text = new TextDecoder().decode(plain).trim();
-      if (text.startsWith('{') || text.startsWith('[')) return text;
-    } catch {}
+  const idx2423 = content.indexOf("2423");
+  const idx2324 = content.indexOf("2324");
+  if (idx2423 === -1 || idx2324 === -1 || idx2324 <= idx2423) return null;
+
+  // key
+  let keyRaw;
+  try {
+    const keyHex = content.slice(idx2423 + 4, idx2324);
+    keyRaw = latin1FromHex(keyHex);
+  } catch {
+    return null;
   }
-  return null;
+  const keyStr = rightPad(keyRaw, "0", 16);
+  const keyBytes = new TextEncoder().encode(keyStr).slice(0, 16);
+
+  // cipher：2324 之后 到 len-26
+  const dataStart = idx2324 + 4;
+  const dataEnd = content.length - 26;
+  if (dataEnd <= dataStart) return null;
+  const dataHex = content.slice(dataStart, dataEnd);
+
+  // iv：末尾 26 字符
+  const trimmed = content.replace(/\s+$/, "");
+  const tsHex = trimmed.slice(trimmed.length - 26);
+  let tsRaw;
+  try {
+    tsRaw = latin1FromHex(tsHex);
+  } catch {
+    tsRaw = tsHex;
+  }
+  const ivStr = rightPad(tsRaw, "0", 16);
+  const ivBytes = new TextEncoder().encode(ivStr).slice(0, 16);
+
+  // cipher bytes
+  let cipherBytes;
+  try {
+    cipherBytes = hexToBytes(dataHex);
+  } catch {
+    return null;
+  }
+  if (cipherBytes.length === 0 || cipherBytes.length % 16 !== 0) return null;
+
+  try {
+    const plain = await aes128Decrypt(cipherBytes.buffer, keyBytes, ivBytes);
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(plain);
+    return text || null;
+  } catch {
+    return null;
+  }
 }
 
-async function decode2423Plain(content) {
-  const m = content.match(/^2423(.+)2324$/s);
-  if (!m) return null;
-  const inner = m[1];
+/* ================= 2423 plain（$# / #$ 分隔） ================= */
+
+async function decode2423Plain(S) {
+  const idx2324 = S.indexOf("2324");
+  const pDoll = S.indexOf("$#");
+  const pSharp = S.indexOf("#$");
+  if (idx2324 === -1 || pDoll === -1 || pSharp === -1) return null;
+  if (pDoll >= pSharp) return null;
+
+  let dataHex = S.slice(idx2324 + 4, pDoll).replace(/[^0-9a-fA-F]/g, "");
+  if (dataHex.length % 2 !== 0) dataHex = dataHex.slice(0, -1);
+  if (!dataHex) return null;
+
+  const keyStr = rightPad(S.slice(pDoll + 2, pSharp), "0", 16);
+  const ivStr = rightPad(S.slice(S.length - 13), "0", 16);
+  const keyBytes = new TextEncoder().encode(keyStr).slice(0, 16);
+  const ivBytes = new TextEncoder().encode(ivStr).slice(0, 16);
+
+  let cipherBytes;
   try {
-    const d = atob(inner); const t = d.trim();
-    if (t.startsWith('{') || t.startsWith('[')) return t;
-  } catch {}
+    cipherBytes = hexToBytes(dataHex);
+  } catch {
+    return null;
+  }
+  if (cipherBytes.length === 0 || cipherBytes.length % 16 !== 0) return null;
+
   try {
-    const bytes = hexToBytes(inner);
-    const t = new TextDecoder().decode(bytes).trim();
-    if (t.startsWith('{') || t.startsWith('[')) return t;
-  } catch {}
-  return null;
+    const plain = await aes128Decrypt(cipherBytes.buffer, keyBytes, ivBytes);
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(plain);
+    return text || null;
+  } catch {
+    return null;
+  }
 }
+
+/* ================= 其他解码器 ================= */
 
 function decodeUrl(content) {
   if (!/%[0-9A-Fa-f]{2}/.test(content)) return null;
@@ -267,14 +337,6 @@ function extractJsonFragment(text) {
 
 /* ============================================================
    核心：多层循环
-   每轮顺序：
-     1) 删注释
-     2) 删所有空白
-     3) 还原 Unicode
-     4) 是 JSON？→ 返回
-     5) 试所有解码器（2423 / AES / Gzip / URL / Base64）
-     6) 试"可打印片段抽取"（从二进制乱码里捞 base64）
-     7) 本轮无任何变化 → 停止
    ============================================================ */
 
 const MAX_ROUNDS = 12;
@@ -291,7 +353,7 @@ async function decodeLoop(rawText, trace) {
     if (step !== current) trace.push(`R${round}: 删注释`);
     current = step;
 
-    // 2) 删所有空白（换行/空格/tab）
+    // 2) 删所有空白
     step = stripAllWhitespace(current);
     if (step !== current) trace.push(`R${round}: 删空白 (${current.length}→${step.length})`);
     current = step;
@@ -307,7 +369,7 @@ async function decodeLoop(rawText, trace) {
       return current;
     }
 
-    // 5) 依次尝试所有整体解码器
+    // 5) 依次尝试所有解码器（2423 优先）
     const decoders = [
       { name: "2423hex",    fn: decode2423Hex },
       { name: "2423plain",  fn: decode2423Plain },
@@ -330,7 +392,7 @@ async function decodeLoop(rawText, trace) {
       } catch {}
     }
 
-    // 6) 若整体解码没进展，尝试"从乱码里捞片段"
+    // 6) 整体无进展 → 从乱码里捞片段
     if (!advanced) {
       const segs = extractPrintableSegments(current);
       for (const seg of segs) {
@@ -342,6 +404,14 @@ async function decodeLoop(rawText, trace) {
             advanced = true;
             break;
           } catch {}
+        } else if (seg.type === "2423") {
+          const out = await decode2423Hex(seg.value);
+          if (out && out !== current) {
+            trace.push(`R${round}: 捞到 2423 块 (${seg.value.length}→${out.length})`);
+            current = out;
+            advanced = true;
+            break;
+          }
         } else if (seg.type === "base64") {
           const out = await decodeBase64(seg.value);
           if (out && out !== current) {
