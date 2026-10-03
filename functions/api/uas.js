@@ -14,8 +14,8 @@ const UA_LIBRARY = {
 };
 
 const ALLOWED_ORIGINS = [
-  "https://你的前端域名.com",      // ← B 版前端真实域名
-  "https://2.cdz.qzz.io",
+  "https://0.wudaozhe.net",
+  "https://jm.wudaozhe.net",         
   "http://localhost:3000",
   "http://localhost:5173",
   "http://localhost:8080",
