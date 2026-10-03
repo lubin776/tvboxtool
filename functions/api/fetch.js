@@ -6,8 +6,8 @@ import { decryptAndProcess } from '../lib/decrypt.js';
 
 /* ============ CORS 白名单 ============ */
 const ALLOWED_ORIGINS = [
-  "https://你的前端域名.com",      // ← B 版前端真实域名
-  "https://2.cdz.qzz.io",          // ← A 版（如果还在用）
+  "https://0.wudaozhe.net",      // ← B 版前端真实域名
+  "https://jm.wudaozhe.net",          // ← A 版（如果还在用）
   "http://localhost:3000",
   "http://localhost:5173",
   "http://localhost:8080",
