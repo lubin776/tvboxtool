@@ -6,13 +6,14 @@
 
 import { decryptAndProcess } from '../lib/decrypt.js';
 
-/* ============ CORS 白名单（改成你的前端域名） ============ */
+/* ============ CORS 白名单（改成你的域名） ============ */
 const ALLOWED_ORIGINS = [
-  "https://你的前端域名.com",     // ← 改成你的前端域名
+  "https://2.cdz.qzz.io",          // A 版（同源）
+  "https://你的前端域名.com",       // ← B 版，改成真的
   "http://localhost:3000",
   "http://localhost:5173",
   "http://localhost:8080",
-  "http://127.0.0.1:5500",        // VSCode Live Server
+  "http://127.0.0.1:5500",
 ];
 
 function corsHeaders(origin) {
@@ -63,6 +64,12 @@ async function tryFetchOnce(targetUrl, uaInfo) {
     clearTimeout(timer);
 
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    // 图片直接拒绝（防扒源常见手段）
+    const ct = resp.headers.get("content-type") || "";
+    if (ct.startsWith("image/")) {
+      throw new Error(`返回了图片 (${ct})，非接口数据`);
+    }
 
     const text = await resp.text();
     if (!text || text.length < 20) throw new Error("响应内容过短");
@@ -144,7 +151,7 @@ export async function onRequestPost(context) {
 
       try {
         const result = await tryFetchOnce(target, uaInfo);
-        const processed = await decryptAndProcess(result.data, target);
+        const { data: processed, trace } = await decryptAndProcess(result.data, target);
 
         send({
           type: "success",
@@ -152,6 +159,12 @@ export async function onRequestPost(context) {
           finalUrl: result.finalUrl,
           dataLength: processed.length,
         });
+
+        // 解码轨迹
+        if (trace && trace.length) {
+          send({ type: "trace", steps: trace });
+        }
+
         send({ type: "data", content: processed });
         break;
       } catch (err) {
