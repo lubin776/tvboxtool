@@ -2,6 +2,7 @@
 // CF Pages Function: /api/fetch
 // 模拟 TVBox 访问，逐个 UA 尝试，流式返回
 // 已加 CORS，支持前端部署在其他服务器
+// 不做 Content-Type 过滤，任何响应都读成文本交给 decode 层
 // ============================================================
 
 import { decryptAndProcess } from '../lib/decrypt.js';
@@ -47,7 +48,7 @@ function isBrowserUA(ua) {
 async function tryFetchOnce(targetUrl, uaInfo) {
   const headers = {
     "User-Agent": uaInfo.ua,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept": "*/*",
     "Connection": "keep-alive",
   };
   if (uaInfo.xrw) headers["X-Requested-With"] = uaInfo.xrw;
@@ -65,19 +66,16 @@ async function tryFetchOnce(targetUrl, uaInfo) {
 
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
-    // 图片直接拒绝（防扒源常见手段）
-    const ct = resp.headers.get("content-type") || "";
-    if (ct.startsWith("image/")) {
-      throw new Error(`返回了图片 (${ct})，非接口数据`);
-    }
-
+    // 不做任何 Content-Type 过滤，原样读成文本
     const text = await resp.text();
-    if (!text || text.length < 20) throw new Error("响应内容过短");
-    if (text.trim().startsWith("<!DOCTYPE html") || text.trim().startsWith("<html")) {
-      throw new Error("返回了 HTML 页面而非接口数据");
-    }
+    if (!text || text.length < 5) throw new Error("响应内容过短");
 
-    return { success: true, data: text, finalUrl: resp.url };
+    return {
+      success: true,
+      data: text,
+      finalUrl: resp.url,
+      contentType: resp.headers.get("content-type") || "",
+    };
   } catch (err) {
     clearTimeout(timer);
     throw new Error(err.name === "AbortError" ? "超时 (15s)" : err.message);
@@ -151,16 +149,19 @@ export async function onRequestPost(context) {
 
       try {
         const result = await tryFetchOnce(target, uaInfo);
+
+        // ===== 后置处理：删注释/删空白/多层解码 =====
         const { data: processed, trace } = await decryptAndProcess(result.data, target);
 
         send({
           type: "success",
           ua: uaInfo.ua,
           finalUrl: result.finalUrl,
+          contentType: result.contentType,
+          rawLength: result.data.length,
           dataLength: processed.length,
         });
 
-        // 解码轨迹
         if (trace && trace.length) {
           send({ type: "trace", steps: trace });
         }
