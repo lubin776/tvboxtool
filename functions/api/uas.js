@@ -1,6 +1,5 @@
 // ============================================================
 // CF Pages Function: /api/uas
-// 返回可选 UA 列表（已加 CORS）
 // ============================================================
 
 const UA_LIBRARY = {
@@ -14,9 +13,9 @@ const UA_LIBRARY = {
   "safari":    { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", xrw: "" },
 };
 
-/* ============ CORS 白名单（与 fetch.js 保持一致） ============ */
 const ALLOWED_ORIGINS = [
-  "https://你的前端域名.com",     // ← 改成你的前端域名
+  "https://你的前端域名.com",      // ← B 版前端真实域名
+  "https://2.cdz.qzz.io",
   "http://localhost:3000",
   "http://localhost:5173",
   "http://localhost:8080",
