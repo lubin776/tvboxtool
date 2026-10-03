@@ -1,6 +1,5 @@
 // ============================================================
-// TVBox 解密工具库 (JavaScript/WebCrypto 移植版)
-// 完整移植自 Python 原版逻辑
+// TVBox 解密工具库 v2 - 支持混合数据剥离 + 多层套壳解密
 // ============================================================
 
 /**
@@ -15,17 +14,10 @@ function hexToBytes(hex) {
 }
 
 /**
- * Uint8Array 转十六进制字符串
- */
-function bytesToHex(bytes) {
-  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-/**
  * Base64 解码（支持 URL-safe）
  */
 function base64Decode(str) {
-  let s = str.replace(/-/g, '+').replace(/_/g, '/');
+  let s = str.replace(/-/g, '+').replace(/_/g, '/').trim();
   while (s.length % 4) s += '=';
   try {
     const binary = atob(s);
@@ -63,18 +55,62 @@ async function aes128Decrypt(ciphertext, key, iv) {
 }
 
 /**
+ * 判断字符串是否像 Base64
+ */
+function looksLikeBase64(str) {
+  // 至少 20 字符，只包含 Base64 合法字符
+  return str.length >= 20 && /^[A-Za-z0-9+/=_-]+$/.test(str.trim());
+}
+
+/**
+ * 从混合文本中提取可能的加密段
+ * 处理 PNG 头 + 文本 + Base64/2423 混合的情况
+ */
+function extractEncryptedSegments(text) {
+  const segments = [];
+  
+  // 方法1：提取所有看起来像 Base64 的长串
+  const base64Matches = text.match(/[A-Za-z0-9+/=_-]{20,}/g);
+  if (base64Matches) {
+    for (const m of base64Matches) {
+      if (looksLikeBase64(m)) {
+        segments.push(m);
+      }
+    }
+  }
+  
+  // 方法2：提取 2423...2324 模式
+  const patternMatches = text.match(/2423[\s\S]*?2324/g);
+  if (patternMatches) {
+    for (const m of patternMatches) {
+      segments.push(m);
+    }
+  }
+  
+  // 方法3：提取 ** 分隔的段
+  if (text.includes('**')) {
+    const parts = text.split('**');
+    for (const p of parts) {
+      if (p.trim().length > 20) segments.push(p.trim());
+    }
+  }
+  
+  // 去重
+  return [...new Set(segments)];
+}
+
+/**
  * 尝试 2423/2324 hex 形态解密
  */
-async function tryDecrypt2423Hex(content, sourceUrl) {
-  const match = content.match(/^2423([0-9a-fA-F]+)2324/);
+async function tryDecrypt2423Hex(content) {
+  // 匹配 2423 开头 2324 结尾
+  const match = content.match(/^2423([0-9a-fA-F]+)2324$/);
   if (!match) return null;
   const hex = match[1];
   if (hex.length < 32) return null;
   const bytes = hexToBytes(hex);
-  // 前16字节IV，16字节后开始是密文
   const iv = bytes.slice(0, 16);
   const cipher = bytes.slice(16);
-  // 尝试多种 key 派生
   const keys = [
     new TextEncoder().encode("1234567890123456"),
     new TextEncoder().encode("tvbox1234567890"),
@@ -84,7 +120,7 @@ async function tryDecrypt2423Hex(content, sourceUrl) {
   for (const key of keys) {
     try {
       const plain = await aes128Decrypt(cipher.buffer, key.slice(0, 16), iv);
-      const text = new TextDecoder().decode(plain).trim();
+      const text = new TextDecoder('utf-8').decode(plain).trim();
       if (text.startsWith('{') || text.startsWith('[')) return text;
     } catch {}
   }
@@ -94,30 +130,43 @@ async function tryDecrypt2423Hex(content, sourceUrl) {
 /**
  * 尝试 2423/2324 plain 形态解密
  */
-async function tryDecrypt2423Plain(content, sourceUrl) {
-  const match = content.match(/^2423(.+)2324$/s);
+async function tryDecrypt2423Plain(content) {
+  const match = content.match(/^2423(.+?)2324$/s);
   if (!match) return null;
   const inner = match[1];
+  // 尝试 Base64 解码 inner
   try {
-    const decoded = atob(inner);
-    if (decoded.trim().startsWith('{') || decoded.trim().startsWith('[')) return decoded.trim();
+    const bytes = base64Decode(inner);
+    const text = new TextDecoder('utf-8').decode(bytes).trim();
+    if (text.startsWith('{') || text.startsWith('[')) return text;
   } catch {}
-  // 尝试 hex
-  try {
-    const bytes = hexToBytes(inner);
-    const text = new TextDecoder().decode(bytes);
-    if (text.trim().startsWith('{') || text.trim().startsWith('[')) return text.trim();
-  } catch {}
+  // 尝试直接当文本
+  if (inner.trim().startsWith('{') || inner.trim().startsWith('[')) return inner.trim();
   return null;
 }
 
 /**
- * 尝试 Base64 解码
+ * 尝试 AES-128-CBC + Base64
  */
-function tryBase64Decode(content) {
+async function tryAesBase64(content) {
   try {
-    const decoded = atob(content.replace(/-/g, '+').replace(/_/g, '/'));
-    if (decoded.trim().startsWith('{') || decoded.trim().startsWith('[')) return decoded.trim();
+    const bytes = base64Decode(content);
+    if (bytes.length < 32) return null;
+    const iv = bytes.slice(0, 16);
+    const cipher = bytes.slice(16);
+    const keys = [
+      new TextEncoder().encode("1234567890123456"),
+      new TextEncoder().encode("tvbox1234567890"),
+      new TextEncoder().encode("iptvbox12345678"),
+      iv,
+    ];
+    for (const key of keys) {
+      try {
+        const plain = await aes128Decrypt(cipher.buffer, key.slice(0, 16), iv);
+        const text = new TextDecoder('utf-8').decode(plain).trim();
+        if (text.startsWith('{') || text.startsWith('[')) return text;
+      } catch {}
+    }
   } catch {}
   return null;
 }
@@ -129,49 +178,21 @@ async function tryGzipBase64(content) {
   try {
     const bytes = base64Decode(content);
     const decompressed = await gzipDecompress(bytes);
-    const text = new TextDecoder().decode(decompressed).trim();
+    const text = new TextDecoder('utf-8').decode(decompressed).trim();
     if (text.startsWith('{') || text.startsWith('[')) return text;
   } catch {}
   return null;
 }
 
 /**
- * 尝试 AES-128-CBC + Base64
+ * 递归查找并解密（核心入口）
  */
-async function tryAesBase64(content, sourceUrl) {
-  try {
-    const bytes = base64Decode(content);
-    if (bytes.length < 32) return null;
-    const iv = bytes.slice(0, 16);
-    const cipher = bytes.slice(16);
-    const keys = [
-      new TextEncoder().encode("1234567890123456"),
-      new TextEncoder().encode("tvbox1234567890"),
-      new TextEncoder().encode("iptvbox12345678"),
-    ];
-    for (const key of keys) {
-      try {
-        const plain = await aes128Decrypt(cipher.buffer, key.slice(0, 16), iv);
-        const text = new TextDecoder().decode(plain).trim();
-        if (text.startsWith('{') || text.startsWith('[')) return text;
-      } catch {}
-    }
-  } catch {}
-  return null;
-}
-
-/**
- * 递归查找并解密（对应 Python 的 find_result）
- * 拿到响应文本后，先删除注释换行和空格再处理
- */
-async function findResult(rawBytes, sourceUrl) {
-  // 如果输入是 bytes，转成 string
-  let content = typeof rawBytes === 'string' ? rawBytes : new TextDecoder().decode(rawBytes);
+async function findResult(rawInput) {
+  // 转成字符串
+  let content = typeof rawInput === 'string' 
+    ? rawInput 
+    : new TextDecoder('utf-8').decode(rawInput);
   content = content.trim();
-
-  // 0. 先删除注释换行和空格
-  content = cleanJsonComments(content);
-  content = collapseWhitespace(content);
 
   // 1. 先尝试直接 JSON 解析
   try {
@@ -179,66 +200,76 @@ async function findResult(rawBytes, sourceUrl) {
     return content;
   } catch {}
 
-  // 2. 尝试 2423/2324 hex
-  const r1 = await tryDecrypt2423Hex(content, sourceUrl);
-  if (r1) return r1;
+  // 2. 从混合数据中提取加密段
+  const segments = extractEncryptedSegments(content);
+  
+  for (const seg of segments) {
+    // 2a. 尝试直接是 2423 hex
+    const r1 = await tryDecrypt2423Hex(seg);
+    if (r1) return r1;
 
-  // 3. 尝试 2423/2324 plain
-  const r2 = await tryDecrypt2423Plain(content, sourceUrl);
-  if (r2) return r2;
+    // 2b. 尝试 2423 plain
+    const r2 = await tryDecrypt2423Plain(seg);
+    if (r2) return r2;
 
-  // 4. 尝试 AES + Base64
-  const r3 = await tryAesBase64(content, sourceUrl);
-  if (r3) return r3;
-
-  // 5. 尝试 Gzip + Base64
-  const r4 = await tryGzipBase64(content);
-  if (r4) return r4;
-
-  // 6. 尝试 Base64
-  const r5 = tryBase64Decode(content);
-  if (r5) return r5;
-
-  // 7. 尝试 ** 分隔符
-  if (content.includes('**')) {
-    const parts = content.split('**');
-    for (const part of parts) {
-      const trimmed = part.trim();
-      if (trimmed.length > 10) {
-        const sub = await findResult(trimmed, sourceUrl);
-        if (sub && (sub.trim().startsWith('{') || sub.trim().startsWith('['))) return sub;
+    // 2c. 尝试 Base64 解码后再递归
+    try {
+      const decoded = base64Decode(seg);
+      const decodedText = new TextDecoder('utf-8').decode(decoded).trim();
+      
+      // 解码后是 2423 格式
+      if (decodedText.startsWith('2423')) {
+        const r3 = await tryDecrypt2423Hex(decodedText) || await tryDecrypt2423Plain(decodedText);
+        if (r3) return r3;
       }
-    }
+      
+      // 解码后是 JSON
+      if (decodedText.startsWith('{') || decodedText.startsWith('[')) {
+        return decodedText;
+      }
+      
+      // 解码后继续递归
+      const r4 = await findResult(decodedText);
+      if (r4 && (r4.trim().startsWith('{') || r4.trim().startsWith('['))) return r4;
+    } catch {}
+
+    // 2d. 尝试 AES + Base64
+    const r5 = await tryAesBase64(seg);
+    if (r5) return r5;
+
+    // 2e. 尝试 Gzip + Base64
+    const r6 = await tryGzipBase64(seg);
+    if (r6) return r6;
   }
 
-  // 8. 如果什么都不是，返回原始内容
-  return content;
+  // 3. 尝试直接 Base64（整体）
+  try {
+    const decoded = base64Decode(content);
+    const decodedText = new TextDecoder('utf-8').decode(decoded).trim();
+    if (decodedText.startsWith('{') || decodedText.startsWith('[')) return decodedText;
+    const r = await findResult(decodedText);
+    if (r) return r;
+  } catch {}
+
+  // 4. 全部失败，返回原始内容（去掉 PNG 头等非文本垃圾）
+  const cleaned = content.replace(/^\s*\u0089PNG[\s\S]*?(?=[A-Za-z0-9+/=]{20,}|2423|\{)/m, '').trim();
+  return cleaned;
 }
 
 /**
- * 删除注释（对应 Python 的 clean_json_comments）
+ * 删除注释
  */
 function cleanJsonComments(text) {
-  // 删除 // 单行注释
   text = text.replace(/\/\/.*$/gm, '');
-  // 删除 /* */ 多行注释
   text = text.replace(/\/\*[\s\S]*?\*\//g, '');
   return text;
 }
 
 /**
- * 压缩空白（对应 Python 的 collapse_whitespace）
- */
-function collapseWhitespace(text) {
-  return text.replace(/\s+/g, ' ').trim();
-}
-
-/**
- * 提取 JSON 片段（对应 Python 的 extract_json）
+ * 提取 JSON 片段
  */
 function extractJson(text) {
   text = cleanJsonComments(text);
-  // 尝试找到 { } 或 [ ] 的完整 JSON
   const patterns = [
     /\{[\s\S]*\}/,
     /\[[\s\S]*\]/,
@@ -256,12 +287,11 @@ function extractJson(text) {
 }
 
 /**
- * 过滤 JSON 字段（对应 Python 的 filter_json）
+ * 过滤 JSON 字段
  */
 function filterJson(jsonStr) {
   try {
     const obj = JSON.parse(jsonStr);
-    // 递归过滤空值
     function clean(node) {
       if (Array.isArray(node)) {
         return node.map(clean).filter(v => v !== null && v !== undefined && v !== '');
@@ -284,25 +314,19 @@ function filterJson(jsonStr) {
 }
 
 /**
- * 路径补全（对应 Python 的 absolutize_json）
+ * 路径补全
  */
 function absolutizeJson(jsonStr, baseUrl) {
   try {
     const obj = JSON.parse(jsonStr);
     const base = new URL(baseUrl);
     function resolve(node) {
-      if (Array.isArray(node)) {
-        return node.map(resolve);
-      }
+      if (Array.isArray(node)) return node.map(resolve);
       if (node && typeof node === 'object') {
         const result = {};
         for (const [k, v] of Object.entries(node)) {
           if (typeof v === 'string' && (k === 'url' || k === 'link' || k === 'src' || k === 'pic' || k === 'img' || k.endsWith('Url') || k.endsWith('Link'))) {
-            try {
-              result[k] = new URL(v, base).toString();
-            } catch {
-              result[k] = v;
-            }
+            try { result[k] = new URL(v, base).toString(); } catch { result[k] = v; }
           } else {
             result[k] = resolve(v);
           }
@@ -311,27 +335,31 @@ function absolutizeJson(jsonStr, baseUrl) {
       }
       return node;
     }
-    const resolved = resolve(obj);
-    return JSON.stringify(resolved, null, 2);
+    return JSON.stringify(resolve(obj), null, 2);
   } catch {
     return jsonStr;
   }
 }
 
 /**
- * 主入口：解密并处理（对应 Python 的 decrypt_and_process）
- * 拿到响应文本后 → 删除注释换行空格 → 处理 → 格式化输出
+ * 主入口：拿到响应文本 → 删除注释 → 解密 → 格式化输出
  */
 export async function decryptAndProcess(rawText, sourceUrl) {
-  // Step 1: 删除注释
-  let cleaned = cleanJsonComments(rawText);
-  // Step 2: 递归解密（过程中会压缩空白）
-  let decrypted = await findResult(cleaned, sourceUrl);
-  // Step 3: 提取 JSON 片段
+  // 清理 PNG/二进制垃圾头
+  let cleaned = rawText.replace(/^\s*\u0089?PNG[\s\S]*?(?=2423|MjQy|eyJ|\{)/i, '').trim();
+  cleaned = cleanJsonComments(cleaned);
+  
+  // 递归解密
+  let decrypted = await findResult(cleaned);
+  
+  // 提取 JSON
   let extracted = extractJson(decrypted);
-  // Step 4: 过滤字段 + 格式化
+  
+  // 过滤 + 格式化
   let filtered = filterJson(extracted);
-  // Step 5: 路径补全 + 最终格式化输出
+  
+  // 路径补全 + 最终输出
   let final = absolutizeJson(filtered, sourceUrl);
+  
   return final;
 }
